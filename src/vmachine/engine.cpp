@@ -72,48 +72,63 @@
 * [27] {rv_instruction := 0x00 + 0x00(x0 = $zero) + 0x00 0x1f(x1 = ra) + opcode}
 * [28] {rv_instructionAddi := 0x00 + (use_register) + 0x13}
 */
+// Internal
 #include <vmachine/engine.h>
 #include <arch/mips32.h>
+#include <asm/mips32.h>
 #include <utils.h>
 
+// External
+#include <unordered_map>
 #include <iostream>
 #include <string>
 
 using namespace std;
 
-// INSTRUCTION FORMAT: [SPECIAL	rs | rt | rd (ADD | SUB | AND | NOR | OR | SLT | SLTU)]
+#define check_shift(x) (x == INST_FUNCT_SLL || x == INST_FUNCT_SRL || x == INST_FUNCT_SRA)
+#define check_logic(k) (k == INST_FUNCT_AND || k == INST_FUNCT_NOR || k == INST_FUNCT_OR)
 #define check_main_format(x) (check_addsub(x) | check_logic(x) | check_conJump(x))
-// INSTRUCTION FORMAT: [SPECIAL	| rs | 0 | JR]
-#define check_jr_format(x) x == INST_FUNCT_JR
-// INSTRUCTION FORMAT: [SPECIAL	rs | rt | 0 | (DIV | DIVU | MULT | MULTU)]
+#define check_sub_funct(x) (x == INST_FUNCT_SUB) || (x == INST_FUNCT_SUBU)
+#define check_add_funct(x) (x == INST_FUNCT_ADD) || (x == INST_FUNCT_ADDU)
+#define check_conJump(x) (x == INST_FUNCT_SLT || x == INST_FUNCT_SLTU)
+#define check_mul(x) (x == INST_FUNCT_MULT || x == INST_FUNCT_MULTU)
+#define check_div(x) (x == INST_FUNCT_DIV || x == INST_FUNCT_DIVU)
+#define check_shamt(x,y,z) (x == 0x00 && (y == NIL && z == NIL))
+#define check_addsub(x) check_add_funct(x) | check_sub_funct(x)
+#define check_shamtRd(x,y) (x == 0x00 && (y == NIL))
+#define check_divmul(x) check_div(x) | check_mul(x)
 #define check_divmul_format(x) check_divmul(x)
-// INSTRUCTION FORMAT: [SPECIAL | 0 | rt | rd | sa | (SLL | SLR | SRA)]
+#define check_jr_format(x) x == INST_FUNCT_JR
 #define check_shift_format(x) check_shift(x)
 
-#define check_add_funct(x) (x == INST_FUNCT_ADD) || (x == INST_FUNCT_ADDU)
-#define check_sub_funct(x) (x == INST_FUNCT_SUB) || (x == INST_FUNCT_SUBU)
-#define check_logic(k) (k == INST_FUNCT_AND || k == INST_FUNCT_NOR || k == INST_FUNCT_OR)
-#define check_addsub(x) check_add_funct(x) | check_sub_funct(x)
-#define check_shamtRd(x) (x == 0x00 && (mips32_r_instruction.getRd().getCode() == NIL))
-#define check_shamt(x) (x == 0x00 && (mips32_r_instruction.getRt().getCode() == NIL && mips32_r_instruction.getRd().getCode() == NIL))
-#define check_shift(x) (x==INST_FUNCT_SLL || x==INST_FUNCT_SRL || x==INST_FUNCT_SRA)
-#define check_conJump(x) (x==INST_FUNCT_SLT || x==INST_FUNCT_SLTU)
-#define check_div(x) (x==INST_FUNCT_DIV || x==INST_FUNCT_DIVU)
-#define check_mul(x) (x==INST_FUNCT_MULT || x==INST_FUNCT_MULTU)
-#define check_divmul(x) check_div(x) | check_mul(x)
-
-
-
-#define RV32_NOP 19 // addi x0,x0,0
-
-#define NIL 0xffffffff
-
-#define ARCH_MIPS32 32
-#define INTEGER_BASE 10
 #define MIPS32_REGISTERS 32
+#define INTEGER_BASE 10
+#define ARCH_MIPS32 32
+#define NIL 0xffffffff
 #define BINARY_BASE 2
+#define RV32_NOP 0x13 // addi x0,x0,0
 
-#define SYNTATIC_ERROR "Syntatic Error!"
+// Map of Instructions
+static std::unordered_map<isa32::word_t,std::string> r_instructions = {
+	{INST_FUNCT_ADD,   INST_NAME_ADD   },
+	{INST_FUNCT_ADDU,  INST_NAME_ADDU  },
+	{INST_FUNCT_SUB,   INST_NAME_SUB   },
+	{INST_FUNCT_SUBU,  INST_NAME_SUBU  },
+	{INST_FUNCT_MULT,  INST_NAME_MULT  },
+	{INST_FUNCT_MULTU, INST_NAME_MULTU },
+	{INST_FUNCT_DIV,   INST_NAME_DIV   },
+	{INST_FUNCT_DIVU,   INST_NAME_DIVU },
+	{INST_FUNCT_AND,   INST_NAME_AND   },
+	{INST_FUNCT_OR,    INST_NAME_OR    },
+	{INST_FUNCT_NOR,   INST_NAME_NOR   },
+	{INST_FUNCT_SLT,   INST_NAME_SLT   },
+	{INST_FUNCT_SLTU,  INST_NAME_SLTU  },
+	{INST_FUNCT_SLL,   INST_NAME_SLL   },
+	{INST_FUNCT_SRL,   INST_NAME_SRL   },
+	{INST_FUNCT_SRA,   INST_NAME_SRA   },
+	{INST_FUNCT_JR,    INST_NAME_JR    },
+
+};
 
 const isa32::word_t registers32[MIPS32_REGISTERS] = {
 	REG_ZERO,
@@ -139,7 +154,9 @@ void Engine::match(isa32::word_t token1,isa32::word_t token2)
 {
     if(token1 != token2)
     {
-        std::cout << "Syntatic Error! Between: " + to_string(token1) + " and " + to_string(token2) + " codes"; 
+        std::cout << 
+			"INSTRUCTION:[ " << mips32_r_instruction.getInstruction().getName() << "] " <<
+			"SYNTATIC ERROR" << " BETWEEN: "+to_string(token1)+" AND "+to_string(token2)+" CODES";  
     }
 }
 
@@ -173,15 +190,17 @@ void Engine::r_procedure_D()
 */
 void Engine::r_procedure_C()
 {
-    if(check_shamtRd(mips32_r_instruction.getInstruction().getShamt()))
+	isa32::word_t rd = mips32_r_instruction.getRd().getCode();
+
+    if(check_shamtRd(mips32_r_instruction.getInstruction().getShamt(),rd))
 	{
 		match(mips32_r_instruction.getInstruction().getShamt(),0x00);
 	}else
 	{
-		match(mips32_r_instruction.getRd().getCode(),registers32[mips32_r_instruction.getRd().getCode()]);
+		match(rd,registers32[rd]);
 
 		// Rule [21] {C_rd := rd.lex}
-		C_rd = mips32_r_instruction.getRd().getCode();
+		C_rd = rd;
 
 		r_procedure_D();
 	}
@@ -192,16 +211,18 @@ void Engine::r_procedure_C()
 */
 void Engine::r_procedure_B()
 {
-	if(check_shamt(mips32_r_instruction.getInstruction().getShamt()))
+	isa32::word_t rd = mips32_r_instruction.getRd().getCode();
+	isa32::word_t rt = mips32_r_instruction.getRt().getCode();
+
+	if(check_shamt(mips32_r_instruction.getInstruction().getShamt(),rt,rd))
 	{
 		match(mips32_r_instruction.getInstruction().getShamt(),0x00);
 	}else
 	{
-		
-		match(mips32_r_instruction.getRt().getCode(),registers32[mips32_r_instruction.getRt().getCode()]);
+		match(rt,registers32[rt]);
 
 		// Rule [22] {B_rt := rt.lex}
-		B_rt = mips32_r_instruction.getRt().getCode();
+		B_rt = rt;
 
 		r_procedure_C();
 	}
@@ -510,7 +531,8 @@ void Engine::r_procedure_Shift()
 void Engine::r_procedure_Function()
 {
 
-	if(check_addsub(mips32_r_instruction.getInstruction().getFunct()) | check_divmul(mips32_r_instruction.getInstruction().getFunct()))
+	if(check_addsub(mips32_r_instruction.getInstruction().getFunct()) | 
+	   check_divmul(mips32_r_instruction.getInstruction().getFunct()))
 	{
 		r_procedure_Arithmetic();
 	}else if(check_jr_format(mips32_r_instruction.getInstruction().getFunct()))
@@ -527,6 +549,7 @@ void Engine::r_procedure_Function()
 		r_procedure_ConJump();
 	}
 }
+
 
 /*
 * First rule of grammar and Parsing tree
@@ -553,10 +576,12 @@ void Engine::r_procedure_S()
  */
 void Engine::r_translator()
 {
-	if(mips32_r_instruction.getRd().getCode() != NIL && mips32_r_instruction.getRd().getCode() == registers32[12])
+	if(mips32_r_instruction.getRd().getCode() != NIL && 
+	   mips32_r_instruction.getRd().getCode() == registers32[12])
 	{
 		flag_use_t4 = true;
-	}else if(mips32_r_instruction.getRd().getCode() != NIL && mips32_r_instruction.getRd().getCode() == registers32[13])
+	}else if(mips32_r_instruction.getRd().getCode() != NIL && 
+			 mips32_r_instruction.getRd().getCode() == registers32[13])
 	{
 		flag_use_t5 = true;
 	}
@@ -576,6 +601,7 @@ void Engine::selectInstruction(isa32::word_t word_inst)
 
 	instruction.setOpcode(((word_inst >> INST_SHIFT_OPCODE) & INST_MASK_OPCODE));
 	instruction.setFunct(((word_inst >> INST_SHIFT_FUNCT) & INST_MASK_FUNCT));
+	instruction.setName(r_instructions[instruction.getFunct()]);
 
 	if(check_main_format(instruction.getFunct()))
 	{ 
